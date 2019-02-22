@@ -37,8 +37,8 @@ class ABackGDALRaster(ABackStoredRaster):
 
     def sample_bands_driver(self, fp, band_ids, gdal_ds):
         rtlx, rtly = self.fp.spatial_to_raster(fp.tl)
-        assert rtlx >= 0 and rtlx < self.fp.rsizex
-        assert rtly >= 0 and rtly < self.fp.rsizey
+        assert rtlx >= 0 and rtlx < self.fp.rsizex, '{} >= 0 and {} < {}'.format(rtlx, rtlx, self.fp.rsizex)
+        assert rtly >= 0 and rtly < self.fp.rsizey, '{} >= 0 and {} < {}'.format(rtly, rtly, self.fp.rsizey)
 
         dstarray = np.empty(np.r_[fp.shape, len(band_ids)], self.dtype)
         for i, band_id in enumerate(band_ids):
@@ -86,6 +86,7 @@ class ABackGDALRaster(ABackStoredRaster):
         del dstfp
 
         # Write ****************************************************************
+        # TODO: Close all but 1 driver? Or let user do this
         with self.acquire_driver_object() as gdal_ds:
             for i, band_id in enumerate(band_ids):
                 leftx, topy = self.fp.spatial_to_raster(fp.tl)

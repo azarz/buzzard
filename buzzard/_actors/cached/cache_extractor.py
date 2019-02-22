@@ -13,14 +13,11 @@ class ActorCacheExtractor(object):
         self._raster = raster
         self._alive = True
 
-        self._path_of_cache_files_ready = {}
+        self._path_of_cache_files_ready = {} # type: Mapping[Footprint, str]
         self._reads_waiting_for_cache_fp = (
             collections.defaultdict(lambda: collections.defaultdict(set))
         ) # type: Mapping[Footprint, Mapping[CachedQueryInfos, Set[int]]]
-
-    @property
-    def address(self):
-        return '/Raster{}/CacheExtractor'.format(self._raster.uid)
+        self.address = '/Raster{}/CacheExtractor'.format(self._raster.uid)
 
     @property
     def alive(self):
@@ -28,11 +25,15 @@ class ActorCacheExtractor(object):
 
     # ******************************************************************************************* **
     def receive_sample_those_cache_files_to_an_array(self, qi, prod_idx):
+        """Receive message: An array is needed soon at it requires one or more read operations.
+        Please perform those reads when the cache files are ready.
+        """
         msgs = []
 
         cache_fps = qi.prod[prod_idx].cache_fps
         available_cache_fps = self._path_of_cache_files_ready.keys() & cache_fps
         missing_cache_fps = cache_fps - available_cache_fps
+
         for cache_fp in available_cache_fps:
             msgs += [Msg(
                 'Reader', 'sample_cache_file_to_unique_array',
@@ -44,13 +45,18 @@ class ActorCacheExtractor(object):
         return msgs
 
     def receive_cache_files_ready(self, path_of_cache_files_ready):
+        """Receive message: A cache file is ready, you might already known it.
+
+        Parameters:
+        path_of_cache_files_ready: dict from Footprint to str
+        """
         msgs = []
 
         new_cache_fps = path_of_cache_files_ready.keys() - self._path_of_cache_files_ready.keys()
         self._path_of_cache_files_ready.update(path_of_cache_files_ready)
 
         for cache_fp in new_cache_fps:
-            # Idea: Send a external message to the facade to expose the set of path to cache files with a mutex
+            # TODO Idea: Send a external message to the facade to expose the set of path to cache files with a mutex
             for qi, prod_idxs in self._reads_waiting_for_cache_fp[cache_fp].items():
                 for prod_idx in prod_idxs:
                     msgs += [Msg(
@@ -58,6 +64,7 @@ class ActorCacheExtractor(object):
                         qi, prod_idx, cache_fp, self._path_of_cache_files_ready[cache_fp]
                     )]
             del self._reads_waiting_for_cache_fp[cache_fp]
+
 
         return msgs
 
@@ -74,7 +81,8 @@ class ActorCacheExtractor(object):
         ----------
         qi: _actors.cached.query_infos.QueryInfos
         """
-        for cache_fp in self._reads_waiting_for_cache_fp.keys() & qi.cache_fps:
+        # Perform fine grain garbage collection
+        for cache_fp in self._reads_waiting_for_cache_fp.keys() & qi.list_of_cache_fp:
             if qi in self._reads_waiting_for_cache_fp[cache_fp]:
                 del self._reads_waiting_for_cache_fp[cache_fp][qi]
                 if len(self._reads_waiting_for_cache_fp[cache_fp]) == 0:
@@ -86,6 +94,7 @@ class ActorCacheExtractor(object):
         assert self._alive
         self._alive = False
         self._reads_waiting_for_cache_fp.clear()
+        self._raster = None
         return []
 
     # ******************************************************************************************* **

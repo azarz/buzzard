@@ -5,7 +5,12 @@ from buzzard._a_gdal_vector import ABackGDALVector
 from buzzard._tools import conv
 
 class GDALMemoryVector(AEmissaryVector):
-    """Proxy for 'Memory' driver vector GDAL datasets"""
+    """Concrete class defining the behavior of a GDAL raster using the "Memory" driver
+
+    Features Defined
+    ----------------
+    None
+    """
 
     def __init__(self, ds, allocator, open_options):
         back = BackGDALMemoryVector(

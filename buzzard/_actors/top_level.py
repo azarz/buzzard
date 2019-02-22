@@ -7,14 +7,18 @@ from buzzard._actors.pool_working_room import ActorPoolWorkingRoom
 from buzzard._actors.global_priorities_watcher import ActorGlobalPrioritiesWatcher
 
 class ActorTopLevel(object):
-    """Actor that takes care of the lifetime of rasters' and pools' actors.
+    """Actor that takes care of the lifetime of all other actors.
 
     That is the only actor that is instanciated by the scheduler. All other actors are
     instanciated here.
+
+    This class does not implement a `die` method, since destroying this actor is the same event
+    as stopping the scheduler's loop. If a destruction is ever needed, call a die method from
+    the scheduler using the `top_level_actor` variable.
     """
     def __init__(self):
         self._rasters = set()
-        self._rasters_of_pool = collections.defaultdict(list)
+        self._rasters_per_pool = collections.defaultdict(list)
 
         self._actor_addresses_of_raster = {}
         self._actor_addresses_of_pool = {}
@@ -22,7 +26,7 @@ class ActorTopLevel(object):
         self._primed = False
         self._alive = True
 
-    address = '/TopLevel'
+    address = '/Global/TopLevel'
 
     @property
     def alive(self):
@@ -49,6 +53,7 @@ class ActorTopLevel(object):
         """
         msgs = []
         self._rasters.add(raster)
+        raster.debug_mngr.event('raster_started', raster.facade_proxy)
 
         # Instanciate raster's actors ******************************************
         actors = raster.create_actors()
@@ -67,9 +72,10 @@ class ActorTopLevel(object):
             ]
             if hasattr(raster, attr)
             for pool in [getattr(raster, attr)]
+            if pool is not None
         }
         for pool_id, pool in pools.items():
-            if pool_id not in self._rasters_of_pool:
+            if pool_id not in self._rasters_per_pool:
                 actors = [
                     ActorPoolWaitingRoom(pool),
                     ActorPoolWorkingRoom(pool),
@@ -81,7 +87,7 @@ class ActorTopLevel(object):
                     for actor in actors
                 ]
 
-            self._rasters_of_pool.append(raster)
+            self._rasters_per_pool[pool_id].append(raster)
 
         return msgs
 
@@ -95,11 +101,17 @@ class ActorTopLevel(object):
         """
         msgs = []
         self._rasters.remove(raster)
+        raster.debug_mngr.event('raster_stopped', raster.facade_proxy)
 
         # Deleting raster's actors *********************************************
+        # Deal with QueriesHandler first.
+        # TODO: Should the order of 'die' messages be enforced somewhere else?
         msgs += [
             Msg(address, 'die')
-            for address in self._actor_addresses_of_raster[raster]
+            for address in sorted(
+                    self._actor_addresses_of_raster[raster],
+                    key=lambda address: 'QueriesHandler' not in address,
+            )
         ]
         del self._actor_addresses_of_raster[raster]
 
@@ -107,45 +119,22 @@ class ActorTopLevel(object):
         pools = {
             id(pool): pool
             for attr in [
-                'computation_pool', 'merge_pool', 'write_pool',
-                'file_checker_pool', 'read_pool', 'resample_pool',
+                'computation_pool', 'merge_pool', 'io_pool', 'resample_pool',
             ]
             if hasattr(raster, attr)
             for pool in [getattr(raster, attr)]
+            if pool is not None
         }
         for pool_id, pool in pools.items():
-            self._rasters_of_pool[pool_id].remove(raster)
-            if len(self._rasters_of_pool) == 0:
-                del self._rasters_of_pool[pool_id]
+            self._rasters_per_pool[pool_id].remove(raster)
+            if len(self._rasters_per_pool[pool_id]) == 0:
+                del self._rasters_per_pool[pool_id]
                 msgs += [
-                    Msg(actor.address, 'die')
-                    for actor in self._actor_addresses_of_pool[pool_id]
+                    Msg(actor_adress, 'die')
+                    for actor_adress in self._actor_addresses_of_pool[pool_id]
                 ]
                 del self._actor_addresses_of_pool[pool_id]
 
         return msgs
-
-    def ext_receive_die(self):
-        """Receive message sent by something else than an actor, still treated synchronously: The
-        DataSource is closing
-        """
-        assert self._alive
-        self._alive = False
-
-        msgs = [
-            Msg(address, 'die')
-            for address in itertools.chain(
-                itertools.chain.from_iterable(self._actor_addresses_of_raster.values()),
-                itertools.chain.from_iterable(self._actor_addresses_of_pool.values()),
-            )
-        ] + [Msg('/GlobalPrioritiesWatcher', 'die')]
-
-        # Clear attributes *****************************************************
-        self._rasters.clear()
-        self._rasters_of_pool.clear()
-        self._actor_addresses_of_raster.clear()
-        self._actor_addresses_of_pool.clear()
-
-        return []
 
     # ******************************************************************************************* **

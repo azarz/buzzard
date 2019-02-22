@@ -3,6 +3,7 @@ import contextlib
 import numpy as np
 from osgeo import gdal, ogr, osr
 import shapely
+import shapely.ops
 import shapely.geometry as sg
 
 from buzzard._a_stored_vector import ABackStoredVector
@@ -10,9 +11,7 @@ from buzzard._tools import conv
 from buzzard._env import Env
 
 class ABackGDALVector(ABackStoredVector):
-    """Abstract class defining the common implementation of all vector file formats
-    defined by the OGR
-    """
+    """Abstract class defining the common implementation of all vector formats in OGR"""
 
     # extent/len implementation ***************************************************************** **
     @property
@@ -175,7 +174,7 @@ class ABackGDALVector(ABackStoredVector):
             geom = geom
         elif self.to_virtual:
             if geom_type == 'coordinates':
-                geom = sg.asShape({
+                geom = sg.shape({
                     'type': self.type,
                     'coordinates': geom,
                 })

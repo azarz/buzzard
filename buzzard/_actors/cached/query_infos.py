@@ -4,6 +4,7 @@ from typing import (
 import collections
 import queue # Should be imported for `mypy`
 from types import MappingProxyType
+import itertools
 
 import numpy as np
 from buzzard._footprint import Footprint
@@ -51,7 +52,7 @@ class CacheProduceInfos(NamedTuple(
         ('fp', ProductionFootprint),
         ('same_grid', bool),
         ('share_area', bool),
-        ('sample_fp', SampleFootprint),
+        ('sample_fp', Union[None, SampleFootprint]),
         ('cache_fps', FrozenSet[CacheFootprint]),
         ('resample_fps', Tuple[ResampleFootprint, ...]),
         ('resample_cache_deps_fps', Mapping[ResampleFootprint, FrozenSet[CacheFootprint]]),
@@ -69,15 +70,26 @@ class CachedQueryInfos(object):
     """
 
     def __init__(self, raster, list_of_prod_fp,
-                 band_ids, dst_nodata, interpolation,
-                 max_queue_size):
+                 band_ids, is_flat, dst_nodata, interpolation,
+                 max_queue_size,
+                 parent_uid, key_in_parent):
         # Mutable attributes ******************************************************************** **
         # Attributes that relates a query to a single optional computation phase
         self.cache_computation = None # type: Union[None, CacheComputationInfos]
 
         # Immutable attributes ****************************************************************** **
+        self.parent_uid = parent_uid
+        self.key_in_parent = key_in_parent
+
         # The parameters given by user in invocation
         self.band_ids = band_ids # type: Sequence[int]
+        self.is_flat = is_flat # type: bool
+        self.unique_band_ids = []
+        for bi in band_ids:
+            if bi not in self.unique_band_ids:
+                self.unique_band_ids.append(bi)
+        self.unique_band_ids = tuple(self.unique_band_ids)
+
         self.dst_nodata = dst_nodata # type: Union[int, float]
         self.interpolation = interpolation # type: str
 
@@ -134,7 +146,8 @@ class CachedQueryInfos(object):
         list_of_prod_resample_sample_dep_fp = [] # type: List[Mapping[ResampleFootprint, Union[None, SampleFootprint]]]
         to_zip.append(list_of_prod_resample_sample_dep_fp)
 
-        it = zip(list_of_prod_fp, list_of_prod_sample_fp, list_of_prod_share_area)
+        it = zip(list_of_prod_fp, list_of_prod_same_grid, list_of_prod_share_area)
+        # TODO idea: What if i spawn a ProcessPoolExecutor if >100 prod. The same could be done for fp.tile. What about a global process pool executor in `buzz.env`?
         for prod_fp, same_grid, share_area in it:
             if not share_area:
                 # Resampling will be performed in one pass, on the scheduler
@@ -146,17 +159,17 @@ class CachedQueryInfos(object):
                 list_of_prod_resample_sample_dep_fp.append(MappingProxyType({resample_fp: None}))
             else:
                 if same_grid:
-                    # Resampling will be performed in one pass, on the scheduler
+                    # Remapping will be performed in one pass, on the scheduler
                     sample_fp = raster.fp & prod_fp
                     resample_fps = [cast(ResampleFootprint, prod_fp)]
                     sample_dep_fp = {
                         resample_fps[0]: sample_fp
                     }
                 else:
-                    sample_fp = raster.build_sampling_footprint_to_remap(prod_fp, interpolation)
+                    sample_fp = raster.build_sampling_footprint_to_remap_interpolate(prod_fp, interpolation)
 
                     if raster.max_resampling_size is None:
-                        # Resampling will be performed in one pass, on a Pool
+                        # Remapping will be performed in one pass, on a Pool
                         resample_fps = [cast(ResampleFootprint, prod_fp)]
                         sample_dep_fp = {
                             resample_fps[0]: sample_fp
@@ -165,23 +178,38 @@ class CachedQueryInfos(object):
                         # Resampling will be performed in several passes, on a Pool
                         rsize = np.maximum(prod_fp.rsize, sample_fp.rsize)
                         countx, county = np.ceil(rsize / raster.max_resampling_size).astype(int)
-                        resample_fps = sample_fp.tile_count(
-                            (countx, county), boundary_effect='shrink'
+                        resample_fps = prod_fp.tile_count(
+                            countx, county, boundary_effect='shrink'
                         ).flatten().tolist()
                         sample_dep_fp = {
-                            resample_fp: raster.build_sampling_footprint_to_remap(resample_fp, interpolation)
+                            resample_fp: (
+                                raster.build_sampling_footprint_to_remap_interpolate(resample_fp, interpolation)
+                                if resample_fp.share_area(raster.fp) else
+                                None
+                            )
                             for resample_fp in resample_fps
                         }
 
-                list_of_prod_sample_fp.append(sample_fp)
-                list_of_prod_cache_fps.append(
-                    frozenset(raster.cache_fps_of_fp(sample_fp))
-                )
-                list_of_prod_resample_fps.append(tuple(resample_fps))
-                list_of_prod_resample_cache_deps_fps.append(MappingProxyType({
-                    resample_fp: frozenset(raster.cache_fps_of_fp(resample_fp))
+                resample_cache_deps_fps = MappingProxyType({
+                    resample_fp: frozenset(raster.cache_fps_of_fp(sample_subfp))
                     for resample_fp in resample_fps
-                }))
+                    for sample_subfp in [sample_dep_fp[resample_fp]]
+                    if sample_subfp is not None
+                })
+                for s in resample_cache_deps_fps.items():
+                    assert len(s) > 0
+
+                # The `intersection of the cache_fps with sample_fp` might not be the same as the
+                # the `intersection of the cache_fps with resample_fps`!
+                cache_fps = frozenset(itertools.chain.from_iterable(
+                    resample_cache_deps_fps.values()
+                ))
+                assert len(cache_fps) > 0
+
+                list_of_prod_cache_fps.append(cache_fps)
+                list_of_prod_sample_fp.append(sample_fp)
+                list_of_prod_resample_fps.append(tuple(resample_fps))
+                list_of_prod_resample_cache_deps_fps.append(resample_cache_deps_fps)
                 list_of_prod_resample_sample_dep_fp.append(MappingProxyType(sample_dep_fp))
 
         self.prod = tuple([
@@ -193,7 +221,7 @@ class CachedQueryInfos(object):
         # The list of all cache Footprints needed, ordered by priority
         self.list_of_cache_fp = [] # type: Sequence[CacheFootprint]
         seen = set()
-        for fps in self.list_of_prod_cache_fps:
+        for fps in list_of_prod_cache_fps:
             for fp in fps:
                 if fp not in seen:
                     seen.add(fp)
@@ -204,7 +232,7 @@ class CachedQueryInfos(object):
         # The dict of cache Footprint to set of production idxs
         # For each `cache_fp`, the set of prod_idx that need this cache tile
         self.dict_of_prod_idxs_per_cache_fp = collections.defaultdict(set) # type: Mapping[CacheFootprint, AbstractSet[int]]
-        for i, (prod_fp, cache_fps) in enumerate(zip(self.list_of_prod_fp, self.list_of_prod_cache_fps)):
+        for i, (prod_fp, cache_fps) in enumerate(zip(list_of_prod_fp, list_of_prod_cache_fps)):
             for cache_fp in cache_fps:
                 self.dict_of_prod_idxs_per_cache_fp[cache_fp].add(i)
         for k, v in self.dict_of_prod_idxs_per_cache_fp.items():
@@ -228,14 +256,15 @@ class CachedQueryInfos(object):
 class CacheComputationInfos(object):
     """Object that store informations about a computation phase of a query.
     Instanciating this object also starts the primitives collection from the list of the cache
-    footprints missing. Primitive collection consist of creating new queries to primitive rasters.
+    footprints missing. Primitive collection consists of creating new raster queries to
+    primitive rasters.
     (e.g. to compute all the missing `slopes` cache files required by a query, a
     single query to `dsm` will be opened)
 
     This object is instanciated for each query that requires missing cache file
     """
 
-    def __init__(self, raster, list_of_cache_fp):
+    def __init__(self, qi, raster, list_of_cache_fp):
         """
         Parameters
         ----------
@@ -250,29 +279,40 @@ class CacheComputationInfos(object):
         # Immutable ************************************************************
         self.list_of_cache_fp = tuple(list_of_cache_fp) # type: Tuple[CacheFootprint, ...]
 
-        # Step 1 - List compute Footprints
+        # Step 1 - List compute Footprints sorted by priority
         l = []
         seen = set()
+        prev_prod_idx = 0
+        self.dict_of_min_prod_idx_per_compute_fp = {}
         for cache_fp in self.list_of_cache_fp:
-            for compute_fp in raster.compute_fp_of_cache_fp(cache_fp):
+            prod_idx = qi.dict_of_min_prod_idx_per_cache_fp[cache_fp]
+            assert prod_idx >= prev_prod_idx
+            prev_prod_idx = prod_idx
+            for compute_fp in raster.compute_fps_of_cache_fp[cache_fp]:
                 if compute_fp not in seen:
                     seen.add(compute_fp)
                     l.append(compute_fp)
+                    self.dict_of_min_prod_idx_per_compute_fp[compute_fp] = prod_idx
+
+        # Sort those tiles by using the same scheme as the WaitingRoom does
+        l = sorted(l, key=lambda fp: (self.dict_of_min_prod_idx_per_compute_fp[fp], -fp.cy, +fp.cx))
         self.list_of_compute_fp = tuple(l) # type: Tuple[ComputationFootprint, ...]
         self.to_collect_count = len(self.list_of_compute_fp) # type: int
         del l, seen
 
         # Step 2 - List primtive Footprints
-        primitive_fps_per_primitive = {
-            name: func(self.list_of_compute_fp)
-            for name, func in self._raster.convert_footprint_per_primitive.items()
+        self.primitive_fps_per_primitive = {
+            name: tuple([func(fp) for fp in self.list_of_compute_fp])
+            for name, func in raster.convert_footprint_per_primitive.items()
         }
 
         # Step 3 - Start collection phase
         self.primitive_queue_per_primitive = {
-            name: func(primitive_fps_per_primitive[name])
-            for name, func in self._raster.queue_data_per_primitive.items()
+            name: prim_back.queue_data(
+                self.primitive_fps_per_primitive[name],
+                parent_uid=raster.uid,
+                key_in_parent=(qi, name),
+                **raster.primitives_kwargs[name]
+            )
+            for name, prim_back in raster.primitives_back.items()
         }
-
-    def pull_primitives(self, prim_idx):
-        assert prim_idx == self.collected_count

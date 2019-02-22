@@ -7,10 +7,7 @@ class ActorProductionGate(object):
         self._raster = raster
         self._queries = {}
         self._alive = True
-
-    @property
-    def address(self):
-        return '/Raster{}/ProductionGate'.format(self._raster.uid)
+        self.address = '/Raster{}/ProductionGate'.format(self._raster.uid)
 
     @property
     def alive(self):
@@ -73,6 +70,7 @@ class ActorProductionGate(object):
         self._alive = False
 
         self._queries.clear()
+        self._raster = None
         return []
 
     # ******************************************************************************************* **
@@ -84,11 +82,11 @@ class ActorProductionGate(object):
             if q.allowed_count == qi.produce_count:
                 # All productions started
                 break
-            if q.allowed_count - qi.max_queue_size == pulled_count:
+            if q.allowed_count == pulled_count + qi.max_queue_size:
                 # Enough production started yet
                 break
             msgs += [Msg(
-                'Producer', 'make_this_array', q.allowed_count
+                'Producer', 'make_this_array', qi, q.allowed_count
             )]
             q.allowed_count += 1
 

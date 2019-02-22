@@ -272,8 +272,9 @@ class Footprint(TileMixin, IntersectionMixin):
         rsize = np.asarray(
             [endx - startx, endy - starty]
         )
-        tl = self.tl + [startx, starty] * self.pxvec
-        size = rsize * self.pxsize
+        tl = self.tl + startx * self.pxlrvec + starty * self.pxtbvec
+        # tl = self.tl + [startx, starty] * self.pxvec
+        # size = rsize * self.pxsize
         gt = self.gt
         gt[0] = tl[0]
         gt[3] = tl[1]
@@ -618,7 +619,7 @@ class Footprint(TileMixin, IntersectionMixin):
     @property
     def tl(self):
         """Spatial coordinates: raster top left (x, y)"""
-        return self._tl
+        return self._tl.copy()
 
     @property
     def tlx(self):
@@ -633,7 +634,7 @@ class Footprint(TileMixin, IntersectionMixin):
     @property
     def bl(self):
         """Spatial coordinates: raster bottom left (x, y)"""
-        return self._bl
+        return self._bl.copy()
 
     @property
     def blx(self):
@@ -648,7 +649,7 @@ class Footprint(TileMixin, IntersectionMixin):
     @property
     def br(self):
         """Spatial coordinates: raster bottom right (x, y)"""
-        return self._br
+        return self._br.copy()
 
     @property
     def brx(self):
@@ -663,7 +664,7 @@ class Footprint(TileMixin, IntersectionMixin):
     @property
     def tr(self):
         """Spatial coordinates: raster top right (x, y)"""
-        return self._tr
+        return self._tr.copy()
 
     @property
     def trx(self):
@@ -777,7 +778,7 @@ class Footprint(TileMixin, IntersectionMixin):
     @property
     def rsize(self):
         """Pixel quantities: (pixel per line, pixel per column)"""
-        return self._rsize
+        return self._rsize.copy()
 
     @property
     def rsizex(self):
@@ -959,12 +960,16 @@ class Footprint(TileMixin, IntersectionMixin):
     @property
     def rarea(self):
         """Pixel quantity: pixel count"""
-        return int(np.prod(self.rsize))
+        rx, ry = self.rsize
+        # Convert to int before multiplication to avoid overflow
+        return int(rx) * int(ry)
 
     @property
     def rlength(self):
         """Pixel quantity: pixel count in the outer ring"""
-        inner_area = max(0, self.rsizex - 2) * max(0, self.rsizey - 2)
+        rx, ry = self.rsize
+        # Convert to int before multiplication to avoid overflow
+        inner_area = max(0, int(rx) - 2) * max(0, int(ry) - 2)
         return self.rarea - inner_area
 
     # Accessors - Affine transformations ******************************************************** **
@@ -991,6 +996,7 @@ class Footprint(TileMixin, IntersectionMixin):
     @property
     def affine(self):
         """Underlying affine object"""
+        # TODO: Check if _aff is mutable
         return self._aff
 
     @property
@@ -1063,7 +1069,25 @@ class Footprint(TileMixin, IntersectionMixin):
         return not a.disjoint(b) and not a.touches(b)
 
     def equals(self, other):
-        """Binary predicate: Is other Footprint equal to self
+        """Binary predicate: Is other Footprint exactly equal to self
+
+        Parameters
+        ----------
+        other: Footprint
+
+        Returns
+        -------
+        bool
+        """
+        if (self.gt != other.gt).any():
+            return False
+        if (self.rsize != other.rsize).any():
+            return False
+        return True
+
+    def almost_equals(self, other):
+        """Binary predicate: Is other Footprint almost equal to self with regard to
+        buzz.env.significant.
 
         Parameters
         ----------
@@ -1343,7 +1367,6 @@ class Footprint(TileMixin, IntersectionMixin):
         """Experimental function!
 
         # TODO: Update doc about skimage.thin and 2x2 squares collapsing
-        # TODO: Add skimage requirements?
 
         Create a list of line-strings from a mask. Works with connectivity 4 and 8. Should work fine
         when several disconnected components
@@ -2094,6 +2117,16 @@ class Footprint(TileMixin, IntersectionMixin):
 
     def __reduce__(self):
         return (_restore, (self.gt, self.rsize))
+
+    def __hash__(self):
+        """Should be optimized with respect with the current implementation of the Footprint
+        class.
+        """
+        # TODO: Speed test and optimize
+        return hash((
+            self._aff.to_gdal(),
+            tuple(self._rsize.tolist()),
+        ))
 
     # The end *********************************************************************************** **
     # ******************************************************************************************* **

@@ -16,10 +16,7 @@ class ActorPoolWorkingRoom(object):
         self._pool = pool
         self._jobs = {}
         self._alive = True
-
-    @property
-    def address(self):
-        return '/Pool{}/WorkingRoom'.format(id(self._pool))
+        self.address = '/Pool{}/WorkingRoom'.format(id(self._pool))
 
     @property
     def alive(self):
@@ -38,6 +35,7 @@ class ActorPoolWorkingRoom(object):
 
         future = self._pool.apply_async(job.func)
         self._jobs[job] = (future, token)
+
         return []
 
     def receive_salvage_token(self, token):
@@ -87,7 +85,7 @@ class ActorPoolWorkingRoom(object):
         assert self._alive
         self._alive = False
         if len(self._jobs) > 0:
-            LOGGER.warn('Killing an ActorPoolWorkingRoom with {} ongoing jobs'.format(
+            LOGGER.warning('Killing an ActorPoolWorkingRoom with {} ongoing jobs'.format(
                 len(self._jobs)
             ))
 

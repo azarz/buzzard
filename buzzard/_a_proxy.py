@@ -5,7 +5,14 @@ from osgeo import osr
 from buzzard import _tools
 
 class AProxy(object):
-    """Base abstract class defining the common behavior of all sources"""
+    """Base abstract class defining the common behavior of all sources opened in the DataSource.
+
+    Features Defined
+    ----------------
+    - Has a `stored` spatial reference
+    - Has a `virtual` spatial reference that is influenced by the DataSource's opening mode
+    - Can be closed
+    """
 
     def __init__(self, ds, back):
         self._ds = ds
@@ -44,6 +51,10 @@ class AProxy(object):
         string or None
         """
         return self._back.proj4_virtual
+
+    def get_keys(self):
+        """Get the list of keys under which this proxy is registed in the DataSource"""
+        return list(self._ds._keys_of_proxy[self])
 
     @property
     def close(self):
@@ -85,7 +96,7 @@ class AProxy(object):
 class ABackProxy(object):
     """Implementation of AProxy's specifications"""
 
-    def __init__(self, back_ds, wkt_stored, rect):
+    def __init__(self, back_ds, wkt_stored, rect, **kwargs):
         wkt_virtual = back_ds.virtual_of_stored_given_mode(
             wkt_stored, back_ds.wkt_work, back_ds.wkt_fallback, back_ds.wkt_forced,
         )
@@ -102,6 +113,7 @@ class ABackProxy(object):
         self.wkt_virtual = wkt_virtual
         self.to_work = to_work
         self.to_virtual = to_virtual
+        super().__init__(**kwargs)
 
     def close(self):
         """Virtual method:

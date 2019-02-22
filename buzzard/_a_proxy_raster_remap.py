@@ -3,14 +3,21 @@ import cv2
 
 from buzzard._tools import ANY
 
-_EXN_FORMAT = """Illegal remap attempt between two Footprints that do not lie on the same grid.
+_EXN_FORMAT0 = """Illegal remap attempt between two Footprints that do not lie on the same grid.
 full raster    -> {src!s}
 argument       -> {dst!s}
 scales         -> full raster:{src.scale}, argument:{dst.scale}
 grids distance -> {tldiff}
-`allow_interpolation` was set to `False` in `DataSource` constructor. It means that either
+"""
+
+_EXN_FORMAT1 = """`allow_interpolation` was set to `False` in `DataSource` constructor. It means that either
 1. there is a mistake in your code and you did not meant to perform this operation with an unaligned Footprint,
 2. or that you want to perform a resampling operation and that you need `allow_interpolation` to be `True`.
+"""
+
+_EXN_FORMAT2 = """The interpolation is None. It means that either
+1. there is a mistake in your code and you did not meant to perform this operation with an unaligned Footprint,
+2. or that you want to perform a resampling operation and that you need `interpolation` not to be a string.
 """
 
 class ABackProxyRasterRemapMixin(object):
@@ -32,32 +39,41 @@ class ABackProxyRasterRemapMixin(object):
             fp = fp & self.fp
             assert fp.same_grid(self.fp)
             return fp
-        return self.build_sampling_footprint_to_remap(fp, interpolation)
+        return self.build_sampling_footprint_to_remap_interpolate(fp, interpolation)
 
-    def build_sampling_footprint_to_remap(self, fp, interpolation):
-        if not self.back_ds.allow_interpolation: # pragma: no cover
-            raise ValueError(_EXN_FORMAT.format(
+    def build_sampling_footprint_to_remap_interpolate(self, fp, interpolation):
+        if interpolation is None: # pragma: no cover
+            raise ValueError(_EXN_FORMAT0.format(
                 src=self.fp,
                 dst=fp,
                 tldiff=fp.tl - (
                     self.fp.pxtbvec * np.around(~self.fp.affine * fp.tl)[1] +
                     self.fp.pxlrvec * np.around(~self.fp.affine * fp.tl)[0]
                 ) - self.fp.tl,
-            ))
+            ) + _EXN_FORMAT2)
+        if not self.back_ds.allow_interpolation: # pragma: no cover
+            raise ValueError(_EXN_FORMAT0.format(
+                src=self.fp,
+                dst=fp,
+                tldiff=fp.tl - (
+                    self.fp.pxtbvec * np.around(~self.fp.affine * fp.tl)[1] +
+                    self.fp.pxlrvec * np.around(~self.fp.affine * fp.tl)[0]
+                ) - self.fp.tl,
+            ) + _EXN_FORMAT1)
         if interpolation in {'cv_nearest'}:
             dilate_size = 1 * self.fp.pxsizex / fp.pxsizex # hyperparameter
         elif interpolation in {'cv_linear', 'cv_area'}:
             dilate_size = 2 * self.fp.pxsizex / fp.pxsizex # hyperparameter
         else:
             dilate_size = 4 * self.fp.pxsizex / fp.pxsizex # hyperparameter
-        dilate_size = max(2, np.ceil(dilate_size)) # hyperparameter too
+        dilate_size = max(2, np.around(dilate_size)) # hyperparameter too
         fp = fp.dilate(dilate_size)
         fp = self.fp & fp
         return fp
 
     @classmethod
     def remap(cls, src_fp, dst_fp, array, mask, src_nodata, dst_nodata, mask_mode, interpolation):
-        """Function matching the signature of RasterRecipe@resample_array parameter
+        """General remapping function from one Footprint to another.
 
         Caveat
         ------

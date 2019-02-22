@@ -1,9 +1,13 @@
 import enum
-import os
 import collections
+import itertools
+import logging
+import os
 
 from buzzard._actors.message import Msg
 from buzzard._actors.cached.query_infos import CacheComputationInfos
+
+LOGGER = logging.getLogger(__name__)
 
 class ActorCacheSupervisor(object):
     """Actor that takes care of tracking, checking and schedule computation of cache files"""
@@ -17,15 +21,18 @@ class ActorCacheSupervisor(object):
         self._raster = raster
         self._cache_fps_status = {
             cache_fp: _CacheTileStatus.unknown
-            for cache_fp in raster.cache_fps
+            for cache_fp in raster.cache_fps.flat
         }
-        self._path_of_cache_fp = {}
         self._queries = {}
         self._alive = True
+        self.address = '/Raster{}/CacheSupervisor'.format(self._raster.uid)
+        self._directory_primed = False
 
-    @property
-    def address(self):
-        return '/Raster{}/CacheSupervisor'.format(self._raster.uid)
+        # Should contain the path to all files that will be opened using the DataSource's activation
+        # pool. It means all cache files in those status:
+        # - _CacheTileStatus.checking
+        # - _CacheTileStatus.ready
+        self._path_of_cache_fp = raster.async_dict_path_of_cache_fp
 
     @property
     def alive(self):
@@ -41,6 +48,18 @@ class ActorCacheSupervisor(object):
         ----------
         qi: _actors.cached.query_infos.QueryInfos
         """
+
+        if not self._directory_primed:
+            self._directory_primed = True
+            os.makedirs(self._raster.cache_dir, exist_ok=True)
+            if self._raster.overwrite:
+                file_list = self._raster.list_cache_path_candidates()
+                LOGGER.info('Removing {} cache files'.format(
+                    len(file_list)
+                ))
+                for path in file_list:
+                    os.remove(path)
+
         msgs = []
         cache_fps = qi.list_of_cache_fp
 
@@ -60,20 +79,26 @@ class ActorCacheSupervisor(object):
                 query.cache_fps_to_compute.add(cache_fp)
 
             elif status == _CacheTileStatus.unknown:
-                path_candidates = self._list_cache_path_candidates(cache_fp)
-
+                path_candidates = self._raster.list_cache_path_candidates(cache_fp)
                 if len(path_candidates) == 1:
                     self._cache_fps_status[cache_fp] = _CacheTileStatus.checking
+                    self._path_of_cache_fp[cache_fp] = path_candidates[0]
+                    self._raster.debug_mngr.event('cache_file_update', self._raster.facade_proxy, cache_fp, 'unknown')
                     query.cache_fps_checking.add(cache_fp)
                     msgs += [
                         Msg('FileChecker', 'infer_cache_file_status', cache_fp, path_candidates[0])
                     ]
                 else:
                     self._cache_fps_status[cache_fp] = _CacheTileStatus.absent
-                    for path in path_candidates:
+                    self._raster.debug_mngr.event('cache_file_update', self._raster.facade_proxy, cache_fp, 'absent')
+                    for path in path_candidates: # pragma: no cover
+                        # TODO: What if can't delete?
+                        LOGGER.warning(
+                            'Removing {} because {} matching tiles'.format(path, len(path_candidates))
+                        )
                         os.remove(path)
                     query.cache_fps_to_compute.add(cache_fp)
-            else:
+            else: # pragma: no cover
                 assert False
 
         if len(query.cache_fps_ensured) != 0:
@@ -117,12 +142,15 @@ class ActorCacheSupervisor(object):
             # - notify the production pipeline
             self._path_of_cache_fp[cache_fp] = path
             self._cache_fps_status[cache_fp] = _CacheTileStatus.ready
+            self._raster.debug_mngr.event('cache_file_update', self._raster.facade_proxy, cache_fp, 'ready')
             msgs += [
                 Msg('CacheExtractor', 'cache_files_ready', {cache_fp: path})
             ]
         else:
             # This cache tile was corrupted and removed
             self._cache_fps_status[cache_fp] = _CacheTileStatus.absent
+            del self._path_of_cache_fp[cache_fp]
+            self._raster.debug_mngr.event('cache_file_update', self._raster.facade_proxy, cache_fp, 'absent')
 
         queries_treated = []
         for qi, query in self._queries.items():
@@ -160,6 +188,7 @@ class ActorCacheSupervisor(object):
 
         self._path_of_cache_fp[cache_fp] = path
         self._cache_fps_status[cache_fp] = _CacheTileStatus.ready
+        self._raster.debug_mngr.event('cache_file_update', self._raster.facade_proxy, cache_fp, 'ready')
         msgs += [
             Msg('CacheExtractor', 'cache_files_ready', {cache_fp: path})
         ]
@@ -182,6 +211,9 @@ class ActorCacheSupervisor(object):
         self._alive = False
 
         self._queries.clear()
+        self._path_of_cache_fp = None
+        self._cache_fps_status.clear()
+        self._raster = None
         return []
 
     # ******************************************************************************************* **
@@ -194,8 +226,14 @@ class ActorCacheSupervisor(object):
             if fp in query.cache_fps_to_compute
         ]
         assert qi.cache_computation is None
-        qi.cache_computation = CacheComputationInfos(self._raster, cache_fps)
-        return [Msg('ComputationGate', 'compute_those_cache_files', qi)]
+        qi.cache_computation = CacheComputationInfos(qi, self._raster, cache_fps)
+        self._raster.debug_mngr.event('object_allocated', qi.cache_computation)
+        return [
+            Msg('/Global/GlobalPrioritiesWatcher', 'a_query_need_those_cache_tiles',
+                self._raster.uid, qi, cache_fps
+            ),
+            Msg('ComputationGate1', 'compute_those_cache_files', qi),
+        ]
 
     # ******************************************************************************************* **
 

@@ -5,7 +5,7 @@ import functools
 import logging
 import uuid # For mypy
 
-import sortedcontainers # TODO: add to requirements.txt
+import sortedcontainers
 import numpy as np
 
 from buzzard._footprint import Footprint # For mypy
@@ -15,6 +15,7 @@ from buzzard._actors.priorities import dummy_priorities, Priorities
 from buzzard._actors.cached.query_infos import CachedQueryInfos
 
 LOGGER = logging.getLogger(__name__)
+OVERLOAD = 2
 
 class ActorPoolWaitingRoom(object):
     """Actor that takes care of prioritizing jobs waiting for spots in a thread/process pool.
@@ -54,13 +55,13 @@ class ActorPoolWaitingRoom(object):
         # Tokens *****************************************************
         pool_id = id(pool)
         self._pool_id = pool_id
-        self._token_count = pool._processes
+        self._token_count = pool._processes + OVERLOAD
         short_id = short_id_of_id(pool_id)
         self._tokens = {
             # This has no particular meaning, the only hard requirement is just to have
             # different tokens in a pool.
             _PoolToken(short_id * 1000 + i)
-            for i in range(pool._processes)
+            for i in range(self._token_count)
         }
         self._all_tokens = set(self._tokens)
 
@@ -89,10 +90,7 @@ class ActorPoolWaitingRoom(object):
             self._prod_jobs_of_query,
             self._cache_jobs_of_cache_fp,
         ]
-
-    @property
-    def address(self):
-        return '/Pool{}/WaitingRoom'.format(self._pool_id)
+        self.address = '/Pool{}/WaitingRoom'.format(self._pool_id)
 
     @property
     def alive(self):
@@ -186,7 +184,7 @@ class ActorPoolWaitingRoom(object):
         assert self._alive
         self._alive = False
         if self._job_count:
-            LOGGER.warn('Killing an ActorPoolWaitingRoom with {} waiting jobs'.format(
+            LOGGER.warning('Killing an ActorPoolWaitingRoom with {} waiting jobs'.format(
                 self._job_count,
             ))
 
@@ -232,7 +230,7 @@ class ActorPoolWaitingRoom(object):
                 cx, cy = job.fp.c
                 prio += (-cy, +cx, job.action_priority,)
 
-            else:
+            else: # pragma: no cover
                 assert False
 
             self._dict_of_prio_per_r1job[job] = prio
@@ -259,7 +257,7 @@ class ActorPoolWaitingRoom(object):
                 self._cache_jobs_of_cache_fp[key].remove(job)
                 if len(self._cache_jobs_of_cache_fp[key]) == 0:
                     del self._cache_jobs_of_cache_fp[key]
-            else:
+            else: # pragma: no cover
                 assert False
 
             prio = self._dict_of_prio_per_r1job.pop(job)
@@ -278,6 +276,7 @@ class ActorPoolWaitingRoom(object):
         # Unstore a rank 1 job
         prio = self._sset_of_prios[0]
         job = next(iter(self._dict_of_r1jobs_per_prio[prio])) # Pop an arbitrary one
+
         self._unstore_job(job)
         return job
 

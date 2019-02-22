@@ -9,7 +9,12 @@ from buzzard._tools import conv
 from buzzard._footprint import Footprint
 
 class GDALFileRaster(APooledEmissaryRaster):
-    """Proxy for raster files using GDAL driver except MEM"""
+    """Concrete class defining the behavior of a GDAL raster using a file
+
+    Features Defined
+    ----------------
+    None
+    """
 
     def __init__(self, ds, allocator, open_options, mode):
         back = BackGDALFileRaster(
